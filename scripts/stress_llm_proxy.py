@@ -14,6 +14,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workshop_api import LLMClient
+from workshop_api.llm import DEFAULT_OPENROUTER_MODEL
 from scripts.test_workshop_api import build_analytic_doc, prove_by
 
 
@@ -206,9 +207,9 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--timeout", type=float, default=600.0)
-    parser.add_argument("--model", default="mistral-medium-latest")
+    parser.add_argument("--model", default=DEFAULT_OPENROUTER_MODEL)
     parser.add_argument("--max-tool-calls", type=int, default=30)
-    parser.add_argument("--max-tokens", type=int, default=1400)
+    parser.add_argument("--max-tokens", type=int, default=20_000)
     args = parser.parse_args()
 
     if not LLMClient.from_env(model=args.model).configured:

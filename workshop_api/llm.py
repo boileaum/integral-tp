@@ -35,20 +35,31 @@ else:
     _OPENAI_IMPORT_ERROR = None
 
 DEFAULT_MISTRAL_MODEL = "mistral-medium-latest"
-DEFAULT_OPENROUTER_MODEL = "mistralai/mistral-medium-3-5"
+DEFAULT_OPENROUTER_MODEL = "z-ai/glm-5.3-flash"
+DEFAULT_LLM_MAX_TOKENS = 20_000
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MISTRAL_MEDIUM_INPUT_USD_PER_MILLION = 1.50
+MISTRAL_MEDIUM_CACHED_INPUT_USD_PER_MILLION = 0.15
 MISTRAL_MEDIUM_OUTPUT_USD_PER_MILLION = 7.50
-MISTRAL_CACHED_INPUT_DISCOUNT = 0.10
+GLM_5_3_FLASH_INPUT_USD_PER_MILLION = 0.075
+GLM_5_3_FLASH_CACHED_INPUT_USD_PER_MILLION = 0.015
+GLM_5_3_FLASH_OUTPUT_USD_PER_MILLION = 0.25
 
-MODEL_PRICES_USD_PER_MILLION: dict[str, tuple[float, float]] = {
+MODEL_PRICES_USD_PER_MILLION: dict[str, tuple[float, float, float]] = {
     "mistral-medium-latest": (
         MISTRAL_MEDIUM_INPUT_USD_PER_MILLION,
+        MISTRAL_MEDIUM_CACHED_INPUT_USD_PER_MILLION,
         MISTRAL_MEDIUM_OUTPUT_USD_PER_MILLION,
     ),
     "mistralai/mistral-medium-3-5": (
         MISTRAL_MEDIUM_INPUT_USD_PER_MILLION,
+        MISTRAL_MEDIUM_CACHED_INPUT_USD_PER_MILLION,
         MISTRAL_MEDIUM_OUTPUT_USD_PER_MILLION,
+    ),
+    "z-ai/glm-5.3-flash": (
+        GLM_5_3_FLASH_INPUT_USD_PER_MILLION,
+        GLM_5_3_FLASH_CACHED_INPUT_USD_PER_MILLION,
+        GLM_5_3_FLASH_OUTPUT_USD_PER_MILLION,
     ),
 }
 
@@ -884,7 +895,7 @@ def _plain_data(value: Any) -> Any:
     return str(value)
 
 
-def _price_for_model(model: str) -> tuple[float, float]:
+def _price_for_model(model: str) -> tuple[float, float, float]:
     normalized = (model or DEFAULT_MISTRAL_MODEL).strip()
     return MODEL_PRICES_USD_PER_MILLION.get(
         normalized,
@@ -920,11 +931,9 @@ class LLMUsage:
         total_tokens = max(int(total_tokens or input_tokens + output_tokens), 0)
         cache_tokens = min(max(int(cache_tokens or 0), 0), input_tokens)
         uncached_input_tokens = input_tokens - cache_tokens
-        input_rate, output_rate = _price_for_model(model)
+        input_rate, cached_input_rate, output_rate = _price_for_model(model)
         input_cost_usd = uncached_input_tokens * input_rate / 1_000_000
-        cached_input_cost_usd = (
-            cache_tokens * input_rate * MISTRAL_CACHED_INPUT_DISCOUNT / 1_000_000
-        )
+        cached_input_cost_usd = cache_tokens * cached_input_rate / 1_000_000
         output_cost_usd = output_tokens * output_rate / 1_000_000
         return cls(
             model=model or DEFAULT_MISTRAL_MODEL,
@@ -1220,7 +1229,7 @@ class LLMClient:
         user: str,
         temperature: float | None = None,
         top_p: float | None = None,
-        max_tokens: int = 1400,
+        max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
     ) -> str:
         return self.chat_with_usage(
             system=system,
@@ -1237,7 +1246,7 @@ class LLMClient:
         user: str,
         temperature: float | None = None,
         top_p: float | None = None,
-        max_tokens: int = 1400,
+        max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         verbose: bool = False,
     ) -> ChatResult:
@@ -1603,7 +1612,7 @@ class LLMClient:
         tools: dict[str, Callable[..., Any]] | None = None,
         max_tool_calls: int = 8,
         temperature: float | None = None,
-        max_tokens: int = 1400,
+        max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
         verbose: bool = False,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         close: bool = True,

@@ -29,7 +29,7 @@ OpenRouter API key:
 ```bash
 export WORKSHOP_LLM_PROVIDER="openrouter"
 export OPENROUTER_API_KEY="..."
-export OPENROUTER_MODEL="mistralai/mistral-medium-3-5"
+export OPENROUTER_MODEL="z-ai/glm-5.3-flash"
 export WORKSHOP_LLM_SERVER_CONCURRENCY=2
 export WORKSHOP_LLM_SERVER_MIN_INTERVAL_SECONDS=1.0
 integral-tp-llm-server --host 0.0.0.0 --port 8010
@@ -139,7 +139,7 @@ on the workshop server instead:
 ```bash
 export WORKSHOP_LLM_PROVIDER="openrouter"
 export OPENROUTER_API_KEY="..."
-export OPENROUTER_MODEL="mistralai/mistral-medium-3-5"
+export OPENROUTER_MODEL="z-ai/glm-5.3-flash"
 export WORKSHOP_LLM_SERVER_CONCURRENCY=2
 export WORKSHOP_LLM_SERVER_WORKERS=4
 export WORKSHOP_LLM_SERVER_MIN_INTERVAL_SECONDS=1.0
@@ -206,8 +206,11 @@ os.environ["WORKSHOP_LLM_SERVER_URL"] = "https://<ngrok-host>/llm"
 ```
 
 Each `verbose=True` LLM call prints input tokens, output tokens, and estimated
-USD cost. The estimate knows the current Mistral Medium 3.5 rates for both
-`mistral-medium-latest` and OpenRouter's `mistralai/mistral-medium-3-5`.
+USD cost. The estimate knows the Mistral Medium 3.5 rates for both
+`mistral-medium-latest` and OpenRouter's `mistralai/mistral-medium-3-5`, plus
+OpenRouter's `z-ai/glm-5.3-flash` rates: $0.075/M uncached input, $0.015/M
+cached input, and $0.25/M output. The OpenRouter dashboard remains the source
+of truth when routed-provider prices change.
 
 ## Retrieval Cache
 

@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from .llm import DEFAULT_MISTRAL_MODEL, DEFAULT_OPENROUTER_MODEL, LLMClient, _is_transient_llm_error
+from .llm import DEFAULT_LLM_MAX_TOKENS, DEFAULT_MISTRAL_MODEL, DEFAULT_OPENROUTER_MODEL, LLMClient, _is_transient_llm_error
 
 
 class ChatRequest(BaseModel):
@@ -23,7 +23,11 @@ class ChatRequest(BaseModel):
     model: str | None = None
     temperature: float | None = None
     top_p: float | None = None
-    max_tokens: int = Field(default=1400, ge=1, le=8192)
+    max_tokens: int = Field(
+        default=DEFAULT_LLM_MAX_TOKENS,
+        ge=1,
+        le=DEFAULT_LLM_MAX_TOKENS,
+    )
     reasoning_effort: str | None = None
     prompt_cache_key: str | None = None
 

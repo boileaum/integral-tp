@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from workshop_api import LLMClient, new_document
+from workshop_api.llm import DEFAULT_OPENROUTER_MODEL
 
 
 EXP_PLUS_HIT = {
@@ -365,7 +366,7 @@ def main() -> None:
         choices=["direct", "feedback", "tools", "all"],
         default="direct",
     )
-    parser.add_argument("--model", default="mistral-medium-latest")
+    parser.add_argument("--model", default=DEFAULT_OPENROUTER_MODEL)
     args = parser.parse_args()
 
     run_analytic_api(args.host, args.port, args.timeout)

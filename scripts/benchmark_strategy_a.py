@@ -10,6 +10,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workshop_api import LLMClient
+from workshop_api.llm import DEFAULT_OPENROUTER_MODEL
 from scripts.test_full_tp_llm import (
     AUTO_DERIVE,
     EX_DERIVE_CONTINUOUS,
@@ -386,9 +387,9 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--timeout", type=float, default=600.0)
-    parser.add_argument("--model", default="mistral-medium-latest")
+    parser.add_argument("--model", default=DEFAULT_OPENROUTER_MODEL)
     parser.add_argument("--trials", type=int, default=10)
-    parser.add_argument("--max-tokens", type=int, default=1400)
+    parser.add_argument("--max-tokens", type=int, default=20_000)
     args = parser.parse_args()
 
     llm = LLMClient.direct_from_env(model=args.model)

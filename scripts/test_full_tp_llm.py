@@ -9,6 +9,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from workshop_api import LLMClient
+from workshop_api.llm import DEFAULT_OPENROUTER_MODEL
 from scripts.test_workshop_api import build_analytic_doc
 
 
@@ -105,7 +106,7 @@ def prove_with_feedback(
     extra_context: str = "",
     checkpoint: str = "llm_start",
     verbose: bool = False,
-    max_tokens: int = 1800,
+    max_tokens: int = 20_000,
     temperature: float | None = None,
 ) -> RehearsalStep:
     theorem.checkpoint(checkpoint)
@@ -155,7 +156,7 @@ def prove_with_tools(
     extra_context: str = "",
     checkpoint: str = "start",
     verbose: bool = False,
-    max_tokens: int = 1200,
+    max_tokens: int = 20_000,
     temperature: float | None = None,
 ) -> RehearsalStep:
     theorem.checkpoint(checkpoint)
@@ -428,7 +429,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--timeout", type=float, default=240.0)
-    parser.add_argument("--model", default="mistral-medium-latest")
+    parser.add_argument("--model", default=DEFAULT_OPENROUTER_MODEL)
     parser.add_argument("--attempts", type=int, default=4)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
