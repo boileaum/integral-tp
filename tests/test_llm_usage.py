@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import os
+import inspect
 import unittest
 from unittest.mock import patch
 
-from workshop_api.llm import DEFAULT_OPENROUTER_MODEL, LLMClient, LLMUsage
+from workshop_api.llm import (
+    DEFAULT_LLM_MAX_TOKENS,
+    DEFAULT_OPENROUTER_MODEL,
+    LLMClient,
+    LLMUsage,
+)
+from workshop_api.llm_server import ChatRequest
 
 
 class LLMClientDefaultsTests(unittest.TestCase):
@@ -18,6 +25,20 @@ class LLMClientDefaultsTests(unittest.TestCase):
 
         self.assertEqual(DEFAULT_OPENROUTER_MODEL, "z-ai/glm-5.3-flash")
         self.assertEqual(client.model, DEFAULT_OPENROUTER_MODEL)
+
+    def test_proof_and_proxy_defaults_allow_20k_output_tokens(self) -> None:
+        self.assertEqual(DEFAULT_LLM_MAX_TOKENS, 20_000)
+        self.assertEqual(
+            inspect.signature(LLMClient.prove).parameters["max_tokens"].default,
+            20_000,
+        )
+        self.assertEqual(
+            inspect.signature(LLMClient.chat_with_usage)
+            .parameters["max_tokens"]
+            .default,
+            20_000,
+        )
+        self.assertEqual(ChatRequest.model_fields["max_tokens"].default, 20_000)
 
 
 class LLMUsagePricingTests(unittest.TestCase):

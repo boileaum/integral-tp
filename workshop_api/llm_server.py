@@ -7,14 +7,23 @@ import random
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urljoin
 
+import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from .llm import DEFAULT_LLM_MAX_TOKENS, DEFAULT_MISTRAL_MODEL, DEFAULT_OPENROUTER_MODEL, LLMClient, _is_transient_llm_error
+from .llm import (
+    DEFAULT_LLM_MAX_TOKENS,
+    DEFAULT_MISTRAL_MODEL,
+    DEFAULT_OPENROUTER_MODEL,
+    LLMClient,
+    _is_transient_llm_error,
+)
+from .retrieval import DEFAULT_OPENROUTER_EMBEDDING_MODEL
 
 
 class ChatRequest(BaseModel):
@@ -38,6 +47,13 @@ class ChatResponse(BaseModel):
     raw_usage: Any | None = None
     job_id: str | None = None
     queue: dict[str, Any] | None = None
+
+
+class EmbeddingRequest(BaseModel):
+    input: str | list[str]
+    model: str | None = None
+    encoding_format: str = "float"
+    input_type: str | None = "search_query"
 
 
 class EnqueueResponse(BaseModel):
@@ -93,6 +109,18 @@ RATE_LIMIT_BACKOFF_INITIAL_SECONDS = _env_float(
 )
 BACKOFF_MAX_SECONDS = _env_float("WORKSHOP_LLM_SERVER_BACKOFF_MAX_SECONDS", 45.0)
 JOB_TTL_SECONDS = _env_float("WORKSHOP_LLM_SERVER_JOB_TTL_SECONDS", 3600.0)
+EMBEDDING_MAX_CONCURRENCY = max(
+    1,
+    _env_int("WORKSHOP_EMBEDDING_SERVER_CONCURRENCY", MAX_CONCURRENCY),
+)
+EMBEDDING_MIN_INTERVAL_SECONDS = _env_float(
+    "WORKSHOP_EMBEDDING_SERVER_MIN_INTERVAL_SECONDS",
+    0.0,
+)
+EMBEDDING_MAX_RETRIES = max(
+    0,
+    _env_int("WORKSHOP_EMBEDDING_SERVER_MAX_RETRIES", MAX_JOB_RETRIES),
+)
 
 _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="llm-proxy")
 _queue: asyncio.Queue[str] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
@@ -101,6 +129,8 @@ _waiting_ids: deque[str] = deque()
 _jobs_lock: asyncio.Lock | None = None
 _worker_tasks: list[asyncio.Task[None]] = []
 _limiter: "OutboundLimiter | None" = None
+_embedding_limiter: "OutboundLimiter | None" = None
+_embedding_semaphore: asyncio.Semaphore | None = None
 
 app = FastAPI(title="Integral TP LLM Proxy", version="0.1.0")
 
@@ -177,6 +207,13 @@ def health() -> dict[str, Any]:
         "min_interval_seconds": MIN_INTERVAL_SECONDS,
         "max_queue_size": MAX_QUEUE_SIZE,
         "max_job_retries": MAX_JOB_RETRIES,
+        "embedding_model": (
+            os.getenv("OPENROUTER_EMBEDDING_MODEL")
+            or DEFAULT_OPENROUTER_EMBEDDING_MODEL
+        ),
+        "embedding_max_concurrency": EMBEDDING_MAX_CONCURRENCY,
+        "embedding_min_interval_seconds": EMBEDDING_MIN_INTERVAL_SECONDS,
+        "embedding_max_retries": EMBEDDING_MAX_RETRIES,
     }
 
 
@@ -207,6 +244,60 @@ def _complete_once(request: ChatRequest) -> ChatResponse:
         usage=result.usage.to_dict(),
         raw_usage=result.raw_usage,
     )
+
+
+def _configured_embedding_model() -> str:
+    return (
+        os.getenv("OPENROUTER_EMBEDDING_MODEL")
+        or DEFAULT_OPENROUTER_EMBEDDING_MODEL
+    ).strip()
+
+
+def _embedding_inputs(request: EmbeddingRequest) -> list[str]:
+    inputs = [request.input] if isinstance(request.input, str) else list(request.input)
+    if not inputs or len(inputs) > 64:
+        raise HTTPException(
+            status_code=400,
+            detail="Embedding requests must contain between 1 and 64 inputs.",
+        )
+    if any(not isinstance(item, str) or not item.strip() for item in inputs):
+        raise HTTPException(status_code=400, detail="Embedding inputs must be non-empty text.")
+    return inputs
+
+
+def _embed_once(request: EmbeddingRequest) -> dict[str, Any]:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is required for proxy-side embeddings.")
+
+    model = _configured_embedding_model()
+    if request.model and request.model.strip().lower() != model.lower():
+        raise ValueError(
+            f"Embedding model {request.model!r} is not enabled by this proxy; "
+            f"use {model!r}."
+        )
+    payload: dict[str, Any] = {
+        "input": _embedding_inputs(request),
+        "model": model,
+        "encoding_format": "float",
+    }
+    if request.input_type:
+        payload["input_type"] = request.input_type
+    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    response = requests.post(
+        urljoin(base_url.rstrip("/") + "/", "embeddings"),
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=_env_float("WORKSHOP_EMBEDDING_UPSTREAM_TIMEOUT_SECONDS", 120.0),
+    )
+    response.raise_for_status()
+    body = response.json()
+    if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+        raise ValueError("OpenRouter returned an invalid embeddings response.")
+    return body
 
 
 def _short_error(exc: Exception, *, limit: int = 1000) -> str:
@@ -426,8 +517,12 @@ async def _worker(worker_id: int) -> None:
 
 @app.on_event("startup")
 async def _startup() -> None:
-    global _limiter
+    global _embedding_limiter, _embedding_semaphore, _limiter
     _limiter = OutboundLimiter(min_interval_seconds=MIN_INTERVAL_SECONDS)
+    _embedding_limiter = OutboundLimiter(
+        min_interval_seconds=EMBEDDING_MIN_INTERVAL_SECONDS
+    )
+    _embedding_semaphore = asyncio.Semaphore(EMBEDDING_MAX_CONCURRENCY)
     _worker_tasks[:] = [
         asyncio.create_task(_worker(worker_id), name=f"llm-proxy-worker-{worker_id}")
         for worker_id in range(MAX_CONCURRENCY)
@@ -447,6 +542,47 @@ async def _shutdown() -> None:
 async def queue_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_auth(authorization)
     return await _queue_snapshot()
+
+
+@app.post("/embeddings")
+async def embeddings(
+    request: EmbeddingRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Proxy query embeddings without exposing the OpenRouter key to notebooks."""
+
+    _check_auth(authorization)
+    _embedding_inputs(request)
+    limiter = _embedding_limiter
+    semaphore = _embedding_semaphore
+    if limiter is None or semaphore is None:
+        raise HTTPException(status_code=503, detail="Embedding proxy is not ready.")
+
+    loop = asyncio.get_running_loop()
+    retry_count = 0
+    while True:
+        await limiter.wait_for_slot()
+        try:
+            async with semaphore:
+                return await loop.run_in_executor(_executor, _embed_once, request)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            can_retry = (
+                _is_transient_llm_error(exc)
+                and retry_count < EMBEDDING_MAX_RETRIES
+            )
+            if not can_retry:
+                status_code = 400 if isinstance(exc, ValueError) else 502
+                raise HTTPException(
+                    status_code=status_code,
+                    detail=_short_error(exc),
+                ) from exc
+            retry_count += 1
+            delay_s = _retry_delay(exc, retry_count=retry_count)
+            if _is_rate_limit_error(exc):
+                await limiter.backoff(delay_s)
+            await asyncio.sleep(delay_s)
 
 
 @app.post("/jobs")

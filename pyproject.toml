@@ -19,8 +19,6 @@ colab = [
   "ipywidgets>=8.0.0",
   "numpy",
   "pygments",
-  "sentence-transformers>=2.7.0",
-  "transformers>=4.51.0",
   "pytanque @ git+https://github.com/llm4rocq/pytanque.git",
   "rocq-ml-toolbox[client] @ git+https://github.com/llm4rocq/rocq-ml-toolbox.git",
 ]
@@ -30,6 +28,11 @@ retrieval = [
   "numpy",
   "sentence-transformers>=2.7.0",
   "transformers>=4.51.0",
+]
+stress = [
+  "nbclient>=0.10",
+  "nbformat>=5.10",
+  "websocket-client>=1.8.0",
 ]
 toolbox-client = [
   "rocq-ml-toolbox[client] @ git+https://github.com/llm4rocq/rocq-ml-toolbox.git",

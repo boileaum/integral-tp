@@ -12,6 +12,7 @@ from typing import Any
 
 
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
+DEFAULT_OPENROUTER_EMBEDDING_MODEL = "qwen/qwen3-embedding-4b"
 DEFAULT_HF_DATASET = "theostos/pile-of-rocq"
 DEFAULT_HF_CONFIG = "coq-coquelicot-toc_nodes"
 DEFAULT_HF_SPLIT = "train"
@@ -46,6 +47,12 @@ def _library_from_path(path: str | None) -> str:
 def _query_prompt_name(model_name: str) -> str | None:
     if model_name.startswith("Qwen/Qwen3-Embedding"):
         return "query"
+    return None
+
+
+def _openrouter_model_name(model_name: str) -> str | None:
+    if model_name.lower() == DEFAULT_EMBEDDING_MODEL.lower():
+        return DEFAULT_OPENROUTER_EMBEDDING_MODEL
     return None
 
 
@@ -420,6 +427,10 @@ def build_cache(
     query_prompt_name = _query_prompt_name(model_name)
     if query_prompt_name is not None:
         manifest["query_prompt_name"] = query_prompt_name
+    openrouter_model_name = _openrouter_model_name(model_name)
+    if openrouter_model_name is not None:
+        manifest["openrouter_model_name"] = openrouter_model_name
+        manifest["openrouter_query_input_type"] = "search_query"
     if dataset_source is not None:
         manifest["dataset_source"] = dataset_source
     (output_dir / "manifest.json").write_text(

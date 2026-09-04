@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -145,11 +146,21 @@ class RetrievalExplorer:
     default_library: str | None = None
     default_kind: str = ""
     default_k: int = 8
+    duplicate_click_window_seconds: float = 2.0
     _ui: Any = field(default=None, init=False, repr=False)
     _results_box: Any = field(default=None, init=False, repr=False)
     _selected_box: Any = field(default=None, init=False, repr=False)
     _context_box: Any = field(default=None, init=False, repr=False)
     _selected_label: Any = field(default=None, init=False, repr=False)
+    _search_button: Any = field(default=None, init=False, repr=False)
+    _search_status: Any = field(default=None, init=False, repr=False)
+    _search_in_progress: bool = field(default=False, init=False, repr=False)
+    _last_search_signature: tuple[Any, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _last_search_finished_at: float = field(default=0.0, init=False, repr=False)
 
     @property
     def hits(self) -> list[dict[str, Any]]:
@@ -226,6 +237,8 @@ class RetrievalExplorer:
             layout=widgets.Layout(width="280px"),
         )
         search_button = widgets.Button(description="Search", icon="search")
+        self._search_button = search_button
+        self._search_status = widgets.HTML()
         clear_button = widgets.Button(description="Clear selection", icon="trash")
         self._selected_label = widgets.HTML()
         self._results_box = widgets.VBox(
@@ -250,13 +263,54 @@ class RetrievalExplorer:
         )
 
         def run_search(_: object = None) -> None:
-            hits = self.retriever.search(
-                query.value,
-                library=library.value,
-                kind=kind.value.strip() or None,
-                k=k.value,
+            signature = (
+                query.value.strip(),
+                library.value,
+                kind.value.strip(),
+                int(k.value),
             )
-            self._render_results(hits)
+            now = time.monotonic()
+            duplicate_just_finished = (
+                signature == self._last_search_signature
+                and now - self._last_search_finished_at
+                < max(float(self.duplicate_click_window_seconds), 0.0)
+            )
+            if self._search_in_progress or duplicate_just_finished:
+                self._search_status.value = (
+                    "<span style='color:#57606a'>Duplicate search ignored.</span>"
+                )
+                return
+
+            self._search_in_progress = True
+            search_button.disabled = True
+            search_button.description = "Searching..."
+            search_button.icon = "spinner"
+            self._search_status.value = (
+                "<span style='color:#57606a'>Computing query embedding and searching...</span>"
+            )
+            try:
+                hits = self.retriever.search(
+                    signature[0],
+                    library=signature[1],
+                    kind=signature[2] or None,
+                    k=signature[3],
+                )
+                self._render_results(hits)
+                self._search_status.value = (
+                    f"<span style='color:#1a7f37'>{len(hits)} hit(s).</span>"
+                )
+            except Exception as exc:
+                self._search_status.value = (
+                    "<span style='color:#cf222e'><b>Search failed:</b> "
+                    f"{html.escape(str(exc))}</span>"
+                )
+            finally:
+                self._last_search_signature = signature
+                self._last_search_finished_at = time.monotonic()
+                self._search_in_progress = False
+                search_button.disabled = False
+                search_button.description = "Search"
+                search_button.icon = "search"
 
         search_button.on_click(run_search)
         clear_button.on_click(lambda _: self.clear())
@@ -266,6 +320,7 @@ class RetrievalExplorer:
                 widgets.HTML(_style_html()),
                 query,
                 widgets.HBox([library, kind, k, search_button]),
+                self._search_status,
                 widgets.HTML("<b>Search results</b>"),
                 self._results_box,
                 widgets.HBox([widgets.HTML("<b>Selected context</b>"), clear_button]),

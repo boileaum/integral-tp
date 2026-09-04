@@ -30,8 +30,13 @@ OpenRouter API key:
 export WORKSHOP_LLM_PROVIDER="openrouter"
 export OPENROUTER_API_KEY="..."
 export OPENROUTER_MODEL="z-ai/glm-5.3-flash"
-export WORKSHOP_LLM_SERVER_CONCURRENCY=2
-export WORKSHOP_LLM_SERVER_MIN_INTERVAL_SECONDS=1.0
+export OPENROUTER_EMBEDDING_MODEL="qwen/qwen3-embedding-4b"
+export WORKSHOP_LLM_SERVER_CONCURRENCY=8
+export WORKSHOP_LLM_SERVER_WORKERS=8
+export WORKSHOP_LLM_SERVER_MIN_INTERVAL_SECONDS=0.1
+export WORKSHOP_EMBEDDING_SERVER_CONCURRENCY=8
+export WORKSHOP_EMBEDDING_SERVER_MIN_INTERVAL_SECONDS=0.1
+export WORKSHOP_EMBEDDING_SERVER_MAX_RETRIES=8
 integral-tp-llm-server --host 0.0.0.0 --port 8010
 ```
 
@@ -67,7 +72,7 @@ os.environ["WORKSHOP_LLM_SERVER_URL"] = "https://<ngrok-host>/llm"
 - `integral.v`: compact reference development.
 - `workshop_api/`: small Python API over `rocq-ml-server` for adding Rocq elements, opening lemmas, running tactics, local retrieval hooks, and optional LLM calls.
 - `integral_workshop.ipynb`: 90-minute notebook decomposing `integral.v` step by step.
-- `img/`: small screenshots used by the Colab GPU setup section.
+- `img/`: legacy screenshots from the former Colab GPU setup path.
 - `scripts/build_retrieval_cache.py`: offline builder for the FAISS docstring retrieval cache.
 - `pyproject.toml`: package metadata and Colab extras used by the notebook setup.
 - `requirements-colab.txt`: one-line remote install spec for Colab.
@@ -83,8 +88,9 @@ Open `integral_workshop.ipynb` in Colab from this repository. The setup cells:
 - install `integral-tp[colab]` from GitHub with `%pip`;
 - connect to a remote `rocq-ml-server` endpoint;
 - download the FAISS retrieval cache into `/content`;
-- then all Rocq interaction goes through that remote endpoint, while
-  retrieval queries run inside the Colab Python process.
+- then all Rocq interaction goes through that remote endpoint. The FAISS index
+  stays in the notebook process, while query embeddings are computed through
+  the OpenRouter proxy so participant kernels do not load the 4B model.
 
 The install spec used by default is:
 
@@ -140,11 +146,15 @@ on the workshop server instead:
 export WORKSHOP_LLM_PROVIDER="openrouter"
 export OPENROUTER_API_KEY="..."
 export OPENROUTER_MODEL="z-ai/glm-5.3-flash"
-export WORKSHOP_LLM_SERVER_CONCURRENCY=2
-export WORKSHOP_LLM_SERVER_WORKERS=4
-export WORKSHOP_LLM_SERVER_MIN_INTERVAL_SECONDS=1.0
+export OPENROUTER_EMBEDDING_MODEL="qwen/qwen3-embedding-4b"
+export WORKSHOP_LLM_SERVER_CONCURRENCY=8
+export WORKSHOP_LLM_SERVER_WORKERS=8
+export WORKSHOP_LLM_SERVER_MIN_INTERVAL_SECONDS=0.1
 export WORKSHOP_LLM_SERVER_MAX_RETRIES=8
 export WORKSHOP_LLM_SERVER_QUEUE_SIZE=500
+export WORKSHOP_EMBEDDING_SERVER_CONCURRENCY=8
+export WORKSHOP_EMBEDDING_SERVER_MIN_INTERVAL_SECONDS=0.1
+export WORKSHOP_EMBEDDING_SERVER_MAX_RETRIES=8
 integral-tp-llm-server --host 0.0.0.0 --port 8010
 ```
 
@@ -161,13 +171,17 @@ then store the key only on the proxy machine as `OPENROUTER_API_KEY`.
 Useful tuning variables:
 
 ```bash
-export WORKSHOP_LLM_SERVER_CONCURRENCY=2          # simultaneous upstream calls
-export WORKSHOP_LLM_SERVER_MIN_INTERVAL_SECONDS=1.0
+export WORKSHOP_LLM_SERVER_CONCURRENCY=8          # simultaneous upstream calls
+export WORKSHOP_LLM_SERVER_WORKERS=8
+export WORKSHOP_LLM_SERVER_MIN_INTERVAL_SECONDS=0.1
 export WORKSHOP_LLM_SERVER_MAX_RETRIES=8
 export WORKSHOP_LLM_SERVER_RATE_LIMIT_BACKOFF_INITIAL_SECONDS=10
 export WORKSHOP_LLM_SERVER_BACKOFF_MAX_SECONDS=120
 export WORKSHOP_LLM_SERVER_QUEUE_SIZE=500
 export WORKSHOP_LLM_SERVER_JOB_TTL_SECONDS=3600
+export WORKSHOP_EMBEDDING_SERVER_CONCURRENCY=8
+export WORKSHOP_EMBEDDING_SERVER_MIN_INTERVAL_SECONDS=0.1
+export WORKSHOP_EMBEDDING_SERVER_MAX_RETRIES=8
 ```
 
 To use Mistral directly instead of OpenRouter, set:
@@ -186,6 +200,7 @@ GET  /queue
 POST /jobs
 GET  /jobs/{job_id}
 POST /chat
+POST /embeddings
 ```
 
 `/chat` remains blocking for existing notebook code. The Python client uses
@@ -193,11 +208,15 @@ POST /chat
 queue position, retries, and final wait time when `verbose=True`. Set
 `WORKSHOP_LLM_SERVER_USE_JOBS=0` to force the old blocking `/chat` path.
 
-The notebook only needs the proxy URL:
+By default, retrieval reuses the LLM proxy URL for embeddings, so the notebook
+only needs one proxy URL:
 
 ```python
 os.environ["WORKSHOP_LLM_SERVER_URL"] = "http://llm-workshop.example.org:8010"
 ```
+
+Set `WORKSHOP_EMBEDDING_SERVER_URL` only when embeddings are served at a
+different proxy URL. The OpenRouter key remains on the proxy machine.
 
 Behind the single ngrok/Caddy setup above, use:
 
@@ -235,11 +254,11 @@ the explicit form above can be shortened to just the output paths. The builder
 classifies `Corelib/...` and `Bignums/...` rows as `Stdlib`, and `Coquelicot/...`
 rows as `Coquelicot`.
 
-The default embedding model is `Qwen/Qwen3-Embedding-4B`. You can override it
-with `--model`, but the query-side Colab runtime must use the same model as the
-one recorded in `manifest.json`. For Qwen3 embedding caches, the builder records
-`query_prompt_name = "query"` in the manifest, and the local retriever uses that
-prompt when embedding user queries.
+The default cache model is `Qwen/Qwen3-Embedding-4B`, whose matching OpenRouter
+identifier is `qwen/qwen3-embedding-4b`. The query-side runtime must use a model
+compatible with the one recorded in `manifest.json`; mixing embedding spaces
+silently destroys retrieval quality. For Qwen3 caches, the builder records both
+the local query prompt and the matching OpenRouter model/input type.
 
 The builder writes both `embeddings.npy` and `index.faiss`. The `.npy` file is a
 portable float32 matrix in the same order as `metadata.jsonl`, so you can rebuild
@@ -259,10 +278,11 @@ notebook to the direct zip URL before the retrieval cell:
 DOCSTRING_CACHE_URL = "https://example.org/retrieval_cache.zip"
 ```
 
-The notebook downloads the zip, loads `index.faiss` + `metadata.jsonl`, and
-only computes embeddings for user queries. If the cache is already unpacked in
-the runtime, set `DOCSTRING_CACHE_DIR` instead. Retrieval is local-only: there
-is no remote semantic service and no lexical fallback.
+The notebook downloads the zip and loads `index.faiss` + `metadata.jsonl`
+locally. Only the small user-query embedding request goes through the workshop
+proxy to OpenRouter. If the cache is already unpacked in the runtime, set
+`DOCSTRING_CACHE_DIR` instead. If no embedding proxy URL is configured,
+`RetrievalClient` retains a local SentenceTransformer fallback.
 
 Minimal retrieval use in the notebook:
 

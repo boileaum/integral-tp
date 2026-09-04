@@ -321,6 +321,55 @@ class RocqWorkshop:
             "goals": self.goals(inferred_name)["goals"],
         }
 
+    def ensure_lemma(self, header: str, *, name: str | None = None) -> dict[str, Any]:
+        """Declare a lemma idempotently, replacing a changed open statement.
+
+        Open lemmas live on branches rooted at ``global_state``, so replacing
+        one is safe. A completed lemma is already part of the global Rocq state
+        and therefore cannot be redefined in the same document.
+        """
+
+        header = _clean_command(header)
+        if re.search(r"\b(Proof|Qed|Admitted|Defined|Abort)\b", header):
+            raise ValueError("Pass only the lemma/theorem statement, without Proof/Qed.")
+        match = LEMMA_HEADER_RE.search(header)
+        if not match and name is None:
+            raise ValueError("Could not infer lemma name. Pass name=... explicitly.")
+        inferred_name = match.group(2) if match else name
+        assert inferred_name is not None
+
+        existing = self.lemmas.get(inferred_name)
+        if existing is None:
+            return self.add_lemma(header, name=name)
+        if existing.header == header:
+            return {
+                "ok": True,
+                "lemma": inferred_name,
+                "state_index": existing.latest_index,
+                "goals": self.goals(inferred_name)["goals"],
+                "already_exists": True,
+            }
+        if existing.completed:
+            raise ValueError(
+                f"Lemma `{inferred_name}` is already completed and cannot be "
+                "redefined in this Rocq document. Start a new document or use a new name."
+            )
+
+        # Run first so an invalid correction does not destroy the usable branch.
+        proof_state = self.client.run(self.global_state, header, timeout=self.timeout)
+        self.lemmas[inferred_name] = LemmaSession(
+            name=inferred_name,
+            header=header,
+            nodes=[StateNode(index=0, parent_index=None, command=None, state=proof_state)],
+        )
+        return {
+            "ok": True,
+            "lemma": inferred_name,
+            "state_index": 0,
+            "goals": self.goals(inferred_name)["goals"],
+            "replaced_open_lemma": True,
+        }
+
     def list_lemmas(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for name, lemma in self.lemmas.items():
@@ -653,6 +702,13 @@ class RocqDocument:
     def add_theorem(self, header: str, *, name: str | None = None) -> TheoremSession:
         header = _strip_code_fence(header)
         result = self.workshop.add_lemma(header, name=name)
+        return TheoremSession(self, result["lemma"])
+
+    def ensure_theorem(self, header: str, *, name: str | None = None) -> TheoremSession:
+        """Return an existing theorem, or replace it if its open statement changed."""
+
+        header = _strip_code_fence(header)
+        result = self.workshop.ensure_lemma(header, name=name)
         return TheoremSession(self, result["lemma"])
 
     def add_artefact(self, artefact: str, *, name: str | None = None) -> TheoremSession:

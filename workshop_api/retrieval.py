@@ -8,14 +8,86 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urljoin
 
 import requests
 
 
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
+DEFAULT_OPENROUTER_EMBEDDING_MODEL = "qwen/qwen3-embedding-4b"
 KIND_ALIASES = {
     "start_theorem_proof": "theorem",
 }
+
+
+def _canonical_embedding_model_name(model_name: str) -> str:
+    """Normalize equivalent Hugging Face/OpenRouter model identifiers."""
+
+    return model_name.strip().lower().replace("_", "-")
+
+
+def _openrouter_model_for_cache(model_name: str) -> str | None:
+    aliases = {
+        _canonical_embedding_model_name(DEFAULT_EMBEDDING_MODEL): (
+            DEFAULT_OPENROUTER_EMBEDDING_MODEL
+        ),
+        _canonical_embedding_model_name(DEFAULT_OPENROUTER_EMBEDDING_MODEL): (
+            DEFAULT_OPENROUTER_EMBEDDING_MODEL
+        ),
+    }
+    return aliases.get(_canonical_embedding_model_name(model_name))
+
+
+@dataclass
+class RemoteEmbeddingClient:
+    """OpenAI-compatible embeddings client used through the workshop proxy."""
+
+    server_url: str
+    model_name: str
+    server_token: str | None = None
+    timeout: float = 120.0
+
+    def encode(
+        self,
+        texts: Sequence[str],
+        *,
+        input_type: str | None = None,
+    ) -> list[list[float]]:
+        inputs = [str(text) for text in texts]
+        if not inputs or any(not text.strip() for text in inputs):
+            raise ValueError("Embedding inputs must contain non-empty text.")
+
+        payload: dict[str, Any] = {
+            "input": inputs,
+            "model": self.model_name,
+            "encoding_format": "float",
+        }
+        if input_type:
+            payload["input_type"] = input_type
+        headers = {"Content-Type": "application/json"}
+        if self.server_token:
+            headers["Authorization"] = f"Bearer {self.server_token}"
+
+        response = requests.post(
+            urljoin(self.server_url.rstrip("/") + "/", "embeddings"),
+            json=payload,
+            headers=headers,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        body = response.json()
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, list) or len(data) != len(inputs):
+            raise ValueError("Embedding server returned an invalid number of vectors.")
+
+        ordered = sorted(data, key=lambda item: int(item.get("index", 0)))
+        vectors: list[list[float]] = []
+        for item in ordered:
+            embedding = item.get("embedding") if isinstance(item, dict) else None
+            if not isinstance(embedding, list) or not embedding:
+                raise ValueError("Embedding server returned an invalid vector.")
+            vectors.append([float(value) for value in embedding])
+        return vectors
 
 
 def normalize_kind_name(name: object) -> str:
@@ -260,18 +332,20 @@ def prepare_colab_retrieval_cache(
 class LocalFaissRetriever:
     cache_dir: str | Path
     model_name: str | None = None
+    embedding_server_url: str | None = None
+    embedding_server_token: str | None = None
+    remote_model_name: str | None = None
+    embedding_timeout: float = 120.0
     top_k_multiplier: int = 4
 
     def __post_init__(self) -> None:
         try:
             import faiss
             import numpy as np
-            from sentence_transformers import SentenceTransformer
         except Exception as exc:  # pragma: no cover - dependency error path.
             raise RuntimeError(
-                "Local retrieval requires `faiss-cpu`, `numpy`, and `sentence-transformers`. "
-                "In Colab, install `integral-tp[colab]`, or run: "
-                "`pip install -q faiss-cpu 'sentence-transformers>=2.7.0' 'transformers>=4.51.0'`."
+                "Retrieval requires `faiss-cpu` and `numpy`. Install "
+                "`integral-tp[colab]`, or run `pip install -q faiss-cpu numpy`."
             ) from exc
 
         self._faiss = faiss
@@ -307,7 +381,47 @@ class LocalFaissRetriever:
                 f"Index/metadata mismatch: index has {self.index.ntotal}, "
                 f"metadata has {len(self.metadata)}."
             )
-        self.model = SentenceTransformer(self.model_name)
+        self.remote_embedder: RemoteEmbeddingClient | None = None
+        self.model: Any | None = None
+        if self.embedding_server_url:
+            expected_remote_model = _openrouter_model_for_cache(self.model_name)
+            manifest_remote_model = self.manifest.get("openrouter_model_name")
+            if isinstance(manifest_remote_model, str) and manifest_remote_model.strip():
+                expected_remote_model = manifest_remote_model.strip()
+            active_remote_model = self.remote_model_name or expected_remote_model
+            if not active_remote_model:
+                raise ValueError(
+                    f"Cache model {self.model_name!r} has no known OpenRouter equivalent. "
+                    "Set DOCSTRING_OPENROUTER_EMBEDDING_MODEL only after confirming that "
+                    "it produces vectors compatible with this cache."
+                )
+            if expected_remote_model and (
+                _canonical_embedding_model_name(active_remote_model)
+                != _canonical_embedding_model_name(expected_remote_model)
+            ):
+                raise ValueError(
+                    f"Remote embedding model mismatch: cache expects "
+                    f"{expected_remote_model!r}, but the client was configured with "
+                    f"{active_remote_model!r}."
+                )
+            self.remote_model_name = active_remote_model
+            self.remote_embedder = RemoteEmbeddingClient(
+                server_url=self.embedding_server_url,
+                server_token=self.embedding_server_token,
+                model_name=active_remote_model,
+                timeout=self.embedding_timeout,
+            )
+        else:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except Exception as exc:  # pragma: no cover - dependency error path.
+                raise RuntimeError(
+                    "Local query embeddings require `sentence-transformers`. Install "
+                    "`integral-tp[retrieval]`, configure WORKSHOP_EMBEDDING_SERVER_URL, "
+                    "or run `pip install -q 'sentence-transformers>=2.7.0' "
+                    "'transformers>=4.51.0'`."
+                ) from exc
+            self.model = SentenceTransformer(self.model_name)
 
     def search(
         self,
@@ -323,16 +437,37 @@ class LocalFaissRetriever:
             return []
         libraries = _normalize_libraries(library)
         kinds = _normalize_kinds(kind)
-        encode_kwargs: dict[str, Any] = {}
-        if isinstance(self.query_prompt_name, str) and self.query_prompt_name.strip():
-            encode_kwargs["prompt_name"] = self.query_prompt_name
-        vector = self.model.encode(
-            [query],
-            convert_to_numpy=True,
-            normalize_embeddings=bool(self.manifest.get("normalize_embeddings", True)),
-            show_progress_bar=False,
-            **encode_kwargs,
-        ).astype("float32")
+        normalize_embeddings = bool(self.manifest.get("normalize_embeddings", True))
+        if self.remote_embedder is not None:
+            query_input_type = self.manifest.get("openrouter_query_input_type")
+            if not isinstance(query_input_type, str) or not query_input_type.strip():
+                query_input_type = "search_query"
+            vector = self._np.asarray(
+                self.remote_embedder.encode([query], input_type=query_input_type),
+                dtype="float32",
+            )
+            if normalize_embeddings:
+                norms = self._np.linalg.norm(vector, axis=1, keepdims=True)
+                if self._np.any(norms == 0):
+                    raise ValueError("Embedding server returned a zero-length query vector.")
+                vector = vector / norms
+        else:
+            assert self.model is not None
+            encode_kwargs: dict[str, Any] = {}
+            if isinstance(self.query_prompt_name, str) and self.query_prompt_name.strip():
+                encode_kwargs["prompt_name"] = self.query_prompt_name
+            vector = self.model.encode(
+                [query],
+                convert_to_numpy=True,
+                normalize_embeddings=normalize_embeddings,
+                show_progress_bar=False,
+                **encode_kwargs,
+            ).astype("float32")
+        if vector.ndim != 2 or vector.shape[0] != 1 or vector.shape[1] != self.index.d:
+            raise ValueError(
+                f"Query embedding shape {vector.shape} does not match FAISS index "
+                f"dimension {self.index.d}."
+            )
         search_k = self.index.ntotal if libraries is not None or kinds is not None else max(k * self.top_k_multiplier, k)
         scores, ids = self.index.search(vector, min(int(search_k), int(self.index.ntotal)))
         out: list[dict[str, Any]] = []
@@ -358,11 +493,12 @@ class LocalFaissRetriever:
 
 @dataclass
 class RetrievalClient:
-    """Local FAISS docstring retriever.
+    """FAISS docstring retriever with local or proxy-side query embeddings.
 
-    The client never calls a remote semantic service and has no lexical
-    fallback. Configure either `cache_dir` or `cache_url`; otherwise the first
-    search raises a clear setup error. Pass `library="Stdlib"` or
+    The FAISS index and metadata stay local to the notebook. Query embeddings
+    can be computed by the workshop proxy, so participant kernels do not each
+    load a multi-gigabyte model. Configure either `cache_dir` or `cache_url`;
+    otherwise the first search raises a clear setup error. Pass `library="Stdlib"` or
     `library="Coquelicot"` to restrict matches to one source library. Pass
     `kind="definition"` or `kind=["definition", "theorem"]` to
     restrict matches by Rocq element kind.
@@ -371,6 +507,10 @@ class RetrievalClient:
     cache_dir: str | Path | None = None
     cache_url: str | None = None
     model_name: str | None = None
+    embedding_server_url: str | None = None
+    embedding_server_token: str | None = None
+    remote_model_name: str | None = None
+    embedding_timeout: float = 120.0
     libraries: str | Sequence[str] | None = None
     kinds: str | Sequence[str] | None = None
     _local: LocalFaissRetriever | None = field(default=None, init=False, repr=False)
@@ -382,10 +522,29 @@ class RetrievalClient:
         cache_url: str | None = None,
         cache_dir: str | Path | None = None,
     ) -> "RetrievalClient":
+        embedding_server_url = (
+            os.getenv("WORKSHOP_EMBEDDING_SERVER_URL")
+            or os.getenv("WORKSHOP_LLM_SERVER_URL")
+            or os.getenv("LLM_SERVER_URL")
+            or None
+        )
         return cls(
             cache_url=cache_url or os.getenv("DOCSTRING_CACHE_URL") or None,
             cache_dir=cache_dir or os.getenv("DOCSTRING_CACHE_DIR") or None,
             model_name=os.getenv("DOCSTRING_EMBEDDING_MODEL") or None,
+            embedding_server_url=embedding_server_url,
+            embedding_server_token=(
+                os.getenv("WORKSHOP_EMBEDDING_SERVER_TOKEN")
+                or os.getenv("WORKSHOP_LLM_SERVER_TOKEN")
+                or os.getenv("LLM_SERVER_TOKEN")
+                or None
+            ),
+            remote_model_name=(
+                os.getenv("DOCSTRING_OPENROUTER_EMBEDDING_MODEL") or None
+            ),
+            embedding_timeout=float(
+                os.getenv("WORKSHOP_EMBEDDING_TIMEOUT_SECONDS", "120")
+            ),
             libraries=os.getenv("DOCSTRING_LIBRARIES") or None,
             kinds=os.getenv("DOCSTRING_KINDS") or None,
         )
@@ -402,7 +561,14 @@ class RetrievalClient:
                 "to a direct retrieval_cache.zip URL, set DOCSTRING_CACHE_DIR to an "
                 "unpacked cache directory, or pass cache_url/cache_dir explicitly."
             )
-        self._local = LocalFaissRetriever(cache_dir=cache_dir, model_name=self.model_name)
+        self._local = LocalFaissRetriever(
+            cache_dir=cache_dir,
+            model_name=self.model_name,
+            embedding_server_url=self.embedding_server_url,
+            embedding_server_token=self.embedding_server_token,
+            remote_model_name=self.remote_model_name,
+            embedding_timeout=self.embedding_timeout,
+        )
         return self._local
 
     def search(
